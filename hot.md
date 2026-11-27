@@ -1,0 +1,1 @@
+02_Daily/hot.md

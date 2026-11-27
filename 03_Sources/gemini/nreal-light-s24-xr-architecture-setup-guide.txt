@@ -1,0 +1,199 @@
+﻿Nreal Light + Samsung Galaxy S24 Ultra: Real-Time Multimodal XR Architecture & Setup Guide
+This document compiles the complete hardware, software, and systems architecture for running Nreal Light (XREAL Light) on a Samsung Galaxy S24 Ultra in real-time AR, VR, and XR workloads—integrating OpenCode Mobile, a custom multi-pane UI, Neurosity Crown EEG, Samsung Galaxy Watch Ultra biometrics, and NVIDIA DeepStream.
+1. Hardware & Physical Architecture
+1.1 Composite USB-C Interfaces
+When tethered directly to the Samsung Galaxy S24 Ultra (Snapdragon 8 Gen 3, USB-C DisplayPort Alt Mode), the Nreal Light acts as a composite USB-C hub running four concurrent hardware interfaces without requiring the legacy Nreal Computing Unit or an XREAL Beam:
+1. DisplayPort Alt Mode Sink: Uncompressed 1920×1080 (2D) or 3840×1080 (Full Side-by-Side 3D) video at 60Hz driven directly by the Adreno GPU.
+2. USB HID Sensor Interface: 1000Hz accelerometer, gyroscope, and magnetometer IMU packets.
+3. Dual Grayscale SLAM Cameras: Two corner-mounted wide-angle sensors providing inside-out 6DoF visual-inertial odometry.
+4. Center RGB Camera (UVC): A 5MP forward-facing USB Video Class camera for passthrough computer vision.
+5. USB Audio Class: Stereo temple speakers and dual beamforming microphones.
+1.2 Power, Thermal, and Optical Considerations
+* Charge-and-Play Splitting: Driving micro-OLED displays alongside SLAM/UVC cameras and network streams drains roughly 25–35% battery per hour. Use a USB-C PD charge-and-play splitter (e.g., XREAL Hub or Viture USB-C adapter) that supports DP Alt Mode + USB data pass-through.
+* Thermal Bypass: Enable Pause USB Power Delivery inside Samsung Game Booster settings during heavy GPU/streaming workloads so external power bypasses battery charging and reduces heat near the USB-C controller.
+* Optical Transparency (#000000 Rule): Because the Nreal Light uses Birdbath micro-OLED optics, pure black pixels (#000000) emit zero light and become completely transparent to your eyes. Always design HUD elements on #000000 backgrounds and keep critical UI controls at least 40px inward from screen edges where birdbath optics soften.
+* VR Light Blocker: Snap on the magnetic front light blocker for 3D SBS movies or VR streaming; remove it for optical see-through AR/HUD operation.
+* Cable Care: The Nreal Light uses a non-detachable tether cable—avoid sharp bends near the temple hinge.
+2. S24 Ultra OS Configuration & DeX Conflict Resolution
+2.1 Resolving the Samsung DeX vs. Nebula Conflict
+By default, plugging the Nreal Light into the S24 Ultra auto-launches Samsung DeX, which intercepts the USB display/HID interface and prevents XREAL's Nebula spatial runtime from initializing.
+* To run Nebula (6DoF AR Space):
+   1. Go to Settings > Connected devices > Samsung DeX and turn OFF Auto start when HDMI is connected.
+   2. Sideload legacy Nebula for Android v3.8.0 or v3.8.1 (newer Play Store apps like MyGlasses / ControlGlasses dropped Nreal Light support).
+   3. Grant Nebula Camera, Nearby Devices / USB, Display over other apps, and Location permissions, and set Battery usage to Unrestricted.
+   4. Never lock the phone screen with the power button while inside Nebula AR Space (Android's ACTION_SCREEN_OFF broadcast suspends SLAM tracking); instead, use Nebula's in-app screen-dimming touchpad mode.
+2.2 XR Modes Comparison
+Mode
+	Runtime
+	Tracking
+	Best Use Case
+	AR / Spatial MR
+	Nebula v3.8.x or Custom NRSDK 2.3.0 APK
+	6DoF (SLAM + Plane/Hand tracking)
+	Spatially anchored virtual screens, real-time CV overlays via center RGB camera.
+	Productivity HUD
+	Samsung DeX (Extend mode)
+	0DoF (Head-locked)
+	Native Android apps + Chrome PWAs on a #000000 transparent desktop canvas.
+	VR / 3D Media
+	Hold Brightness Up (3s) for 3840×1080 SBS
+	0DoF / 3DoF
+	3D SBS MKV/MP4 playback (VLC at 32:9) or low-latency PC streaming via Sunshine + Moonlight/Artemis.
+	3. Dual-Display Isolation: OpenCode Mobile + Custom Multi-Pane UI
+To keep OpenCode Mobile interactive on your S24 Ultra's touchscreen while Samsung DeX displays your custom multi-pane UI inside the Nreal Light glasses:
+1. Enable DeX Extend Mode: Connect the glasses, open Settings > Connected devices > Samsung DeX > Connected display, and select Extend (not Screen mirroring).
+2. Disable Automatic Touchpad Takeover: Open Settings > Connected devices > Samsung DeX > Mouse and trackpad and turn OFF Auto open touchpad when DeX starts. Your S24 Ultra remains a normal touchscreen phone even without an external mouse.
+3. Isolate OpenCode Mobile to the Phone (Display 0): Launch OpenCode Mobile exclusively on your S24 Ultra screen (configured with an OLED dark theme and connected over WireGuard/Tailscale to opencode serve). Do not launch it from the DeX app drawer, or Android will migrate its window into the glasses.
+4. Launch Custom UI Exclusively in DeX (Display 1): Using a Bluetooth mouse/ring controller (or briefly tapping the DeX touchpad icon in the phone's navigation bar), open your custom UI inside Google Chrome as a borderless installed PWA (F11 maximized) and set Settings > Samsung DeX > Taskbar > Auto-hide taskbar to ON.
+5. Prevent Link Hijacking: Set Samsung Internet or Firefox as the default browser on your phone screen so tapping links in OpenCode Mobile does not open tabs inside Chrome on DeX.
+6. Lock Audio Routing: Use Quick Settings Media output (or Separate app sound) to route audio cleanly to the Nreal Light temple speakers while keeping microphone dictation active for OpenCode prompts.
+4. Neurosity Crown Integration (@neurosity/sdk)
+Because Android's built-in WebView lacks Web Bluetooth support, avoid embedding console.neurosity.co inside WebView wrappers. Instead, use @neurosity/sdk over Wi-Fi/Cloud WebSockets (or a backend relay) to stream processed cognitive metrics directly from the Crown's onboard processor:
+* High-Signal Streams:
+   * neurosity.focus() (~4 Hz): Cognitive load probability (0.0–1.0).
+   * neurosity.calm() (~4 Hz): Calm/flow state probability (0.0–1.0).
+   * neurosity.kinesis("commandLabel") (Event-driven): Trained motor-imagery triggers (e.g., leftHandPinch at probability > 0.85 with a 1000ms debounce) for hands-free OpenCode diff approvals or UI pane switching.
+   * neurosity.signalQuality() (~1 Hz): Per-channel electrode contact status across all 8 dry sensors.
+   * neurosity.status(): Connection state and battery level.
+* Bandwidth Tip: Avoid streaming raw 8-channel 256Hz EEG (brainwaves("raw")) over mobile links alongside video/SSE streams; rely on onboard-computed .focus(), .calm(), and .kinesis() events.
+Reference Transparent HUD Widget (TypeScript / React)
+import React, { useEffect, useState } from "react";
+import { Neurosity } from "@neurosity/sdk";
+
+interface BciHudProps {
+ deviceId: string;
+ onKinesisTrigger?: (command: string) => void;
+}
+
+export const NeurosityHudWidget: React.FC<BciHudProps> = ({
+ deviceId,
+ onKinesisTrigger,
+}) => {
+ const [focus, setFocus] = useState<number>(0);
+ const [calm, setCalm] = useState<number>(0);
+ const [battery, setBattery] = useState<number | null>(null);
+ const [status, setStatus] = useState<string>("offline");
+ const [lastCommand, setLastCommand] = useState<string | null>(null);
+
+ useEffect(() => {
+   const neurosity = new Neurosity({ deviceId });
+
+   const authSub = neurosity.onAuthStateChanged().subscribe((user) => {
+     if (!user) setStatus("auth_required");
+   });
+
+   const statusSub = neurosity.status().subscribe((s) => {
+     setStatus(s.state);
+     setBattery(s.battery);
+   });
+
+   const focusSub = neurosity.focus().subscribe((f) => {
+     setFocus(Math.round(f.probability * 100));
+   });
+
+   const calmSub = neurosity.calm().subscribe((c) => {
+     setCalm(Math.round(c.probability * 100));
+   });
+
+   const kinesisSub = neurosity.kinesis("leftHandPinch").subscribe((intent) => {
+     if (intent.probability > 0.85) {
+       setLastCommand(intent.label);
+       onKinesisTrigger?.(intent.label);
+       setTimeout(() => setLastCommand(null), 1500);
+     }
+   });
+
+   return () => {
+     authSub.unsubscribe();
+     statusSub.unsubscribe();
+     focusSub.unsubscribe();
+     calmSub.unsubscribe();
+     kinesisSub.unsubscribe();
+   };
+ }, [deviceId, onKinesisTrigger]);
+
+ return (
+   <div
+     style={{
+       backgroundColor: "#000000",
+       color: "#00E5FF",
+       fontFamily: "monospace",
+       padding: "12px 16px",
+       border: "1px solid #1E293B",
+       borderRadius: "6px",
+       display: "flex",
+       gap: "20px",
+       alignItems: "center",
+     }}
+   >
+     <div>
+       <div style={{ fontSize: "11px", opacity: 0.7 }}>CROWN [{status.toUpperCase()}]</div>
+       <div style={{ fontSize: "14px", color: "#00FF88" }}>
+         BAT: {battery !== null ? `${battery}%` : "--"}
+       </div>
+     </div>
+
+     <div>
+       <div style={{ fontSize: "11px", opacity: 0.7 }}>FOCUS</div>
+       <div style={{ fontSize: "20px", fontWeight: "bold", color: "#00FF88" }}>
+         {focus}%
+       </div>
+     </div>
+
+     <div>
+       <div style={{ fontSize: "11px", opacity: 0.7 }}>CALM</div>
+       <div style={{ fontSize: "20px", fontWeight: "bold", color: "#00E5FF" }}>
+         {calm}%
+       </div>
+     </div>
+
+     {lastCommand && (
+       <div
+         style={{
+           padding: "4px 10px",
+           backgroundColor: "#00FF88",
+           color: "#000000",
+           fontWeight: "bold",
+           borderRadius: "4px",
+         }}
+       >
+         TRIGGER: {lastCommand}
+       </div>
+     )}
+   </div>
+ );
+};
+
+5. Multimodal Fusion with NVIDIA DeepStream
+When scaling up to capture live audio, video, Neurosity EEG, and Galaxy Watch Ultra biometrics simultaneously, use a centralized message broker (NATS JetStream or MQTT) and NVIDIA DeepStream as the synchronization spine rather than opening multiple direct WebSockets from the browser UI.
+5.1 System Topology
+[ Nreal Light ] ──(UVC RGB + Mic Audio via S24 Ultra)──> RTSP / WebRTC / SRT ──┐
+                                                                              ▼
+[ Galaxy Watch Ultra ] ──(Samsung Health Sensor SDK)──> Phone Relay ──> [ Broker (NATS / MQTT) ]
+                                                                              │
+[ Neurosity Crown ] ────(@neurosity/sdk Node/Go bridge)────────────────────────┘
+                                                                              │
+                  ┌──────────────────(Metadata Injection)─────────────────────┘
+                  ▼
+       [ NVIDIA DeepStream Pipeline ] (Jetson AGX / dGPU Node)
+        ├── Video: nvurisrcbin -> nvinfer (Vision) ──┐
+        ├── Audio: alsasrc/rtsp -> nvinferaudio ─────┼──> nvmsgconv + nvmsgbroker
+        └── Biometrics/EEG: Pad Probe (NvDsUserMeta) ┘         │
+                                                               ▼
+                                               [ Custom UI / Nreal Light HUD ]
+
+5.2 Ingestion & Synchronization Pipeline
+1. Nreal Light Video & Audio (S24 Ultra → DeepStream):
+   * Capture the center UVC RGB camera (libuvc / Camera2—remembering to request android.permission.CAMERA at runtime on Android 15/16+ before opening the USB device) and USB temple mic audio (AudioRecord).
+   * Stream H.264/H.265 + Opus/AAC over WireGuard via RTSP/SRT/WebRTC into DeepStream's nvurisrcbin and nvinfer / nvinferaudio.
+2. Galaxy Watch Ultra Biometrics (Watch → S24 Ultra → Broker):
+   * Build a lightweight Wear OS background service using the Samsung Health Sensor SDK (v1.4.1+) subscribing to HEART_RATE_CONTINUOUS (HR + Inter-Beat Interval IBI for real-time HRV), SKIN_TEMPERATURE_CONTINUOUS, and ACCELEROMETER_CONTINUOUS.
+   * Relay packets over Wear OS MessageClient / DataClient to the S24 Ultra, which immediately publishes them to telemetry.watch.biometrics.
+3. Neurosity Crown EEG (Bridge → Broker):
+   * Run a headless Node.js or Go worker publishing .focus(), .calm(), .signalQuality(), and .kinesis() events with NTP timestamps to telemetry.bci.crown.
+4. DeepStream NTP Metadata Fusion (NvDsUserMeta):
+   * Sync all devices (Watch, S24 Ultra, GPU node) to the same NTP time server and enable attach-sys-ts=1 in DeepStream's [streammux] config.
+   * Use a GStreamer src pad probe right after nvinfer to match the nearest EEG and Watch biometric ring-buffer entries to NvDsFrameMeta.ntp_timestamp, attaching them as NvDsUserMeta.
+5. Single Fused Stream to Nreal Light HUD:
+   * Publish the unified JSON/FlatBuffers state via nvmsgconv + nvmsgbroker at 10–15 Hz to ui.hud.state.
+   * Your Nreal Light custom UI subscribes to this single WebSocket feed—displaying synchronized HR/HRV, Focus/Calm, Kinesis triggers, and AI vision/audio events while automatically collapsing non-urgent notifications during high cognitive load (focus > 0.70).
